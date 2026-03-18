@@ -1,4 +1,5 @@
 import os
+import urllib.parse
 import feedparser
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -49,10 +50,11 @@ def get_news_headlines(symbol: str, limit: int = 15) -> list[str]:
     """Fetch headlines from multiple sources (Google, ForexLive, DailyFX)."""
     components = get_currency_components(symbol)
     query = f"{symbol} {' '.join(components)}"
+    encoded_query = urllib.parse.quote(query)
     
     # Combined RSS feeds
     feeds = [
-        f"https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en",
+        f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en",
         "https://www.forexlive.com/feed/news",
         "https://www.dailyfx.com/feeds/forex-market-news"
     ]

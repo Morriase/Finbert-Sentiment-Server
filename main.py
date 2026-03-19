@@ -1,5 +1,6 @@
 import os
 import urllib.parse
+import time
 import feedparser
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
@@ -84,6 +85,43 @@ def get_headline_weight(headline: str) -> float:
         return 2.5 # High importance for central bank and macro data
     return 1.0 # Normal technical news
 
+def analyze_headline_with_retry(headline: str, max_retries: int = 3, delay: float = 1.0) -> tuple[float, float]:
+    """Analyze headline sentiment with exponential backoff retry logic."""
+    for attempt in range(max_retries):
+        try:
+            results = client.text_classification(
+                headline,
+                model="ProsusAI/finbert",
+            )
+            
+            prob_pos = 0.0
+            prob_neg = 0.0
+            
+            # Parse the results
+            if hasattr(results, "__iter__"):
+                for res in results:
+                    if isinstance(res, dict):
+                        label = res.get('label', '').lower()
+                        score = res.get('score', 0.0)
+                    else:
+                        label = getattr(res, 'label', '').lower()
+                        score = getattr(res, 'score', 0.0)
+                        
+                    if label == 'positive':
+                        prob_pos = score
+                    elif label == 'negative':
+                        prob_neg = score
+            
+            return prob_pos, prob_neg
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = delay * (2 ** attempt)  # Exponential backoff
+                print(f"Retry {attempt + 1}/{max_retries} for headline after {wait_time:.1f}s: {str(e)[:100]}")
+                time.sleep(wait_time)
+            else:
+                raise e
+
 @app.get("/sentiment", response_model=SentimentResponse)
 def get_sentiment(symbol: str = Query(..., description="Forex symbol to analyze, e.g., EURUSD")):
     if not client:
@@ -99,53 +137,40 @@ def get_sentiment(symbol: str = Query(..., description="Forex symbol to analyze,
     weighted_total = 0.0
     total_weight = 0.0
     processed = 0
+    failed = 0
     
-    for headline in headlines:
+    for idx, headline in enumerate(headlines):
         try:
             weight = get_headline_weight(headline)
             
-            # FinBERT classification
-            results = client.text_classification(
-                headline,
-                model="ProsusAI/finbert",
-            )
+            # Add small delay between requests to avoid overwhelming API
+            if idx > 0:
+                time.sleep(0.3)
             
-            prob_pos = 0.0
-            prob_neg = 0.0
-            
-            # Parse the results
-            if hasattr(results, "__iter__"):
-                for res in results:
-                    # Depending on hugginface_hub version, results may be dicts or objects
-                    if isinstance(res, dict):
-                        label = res.get('label', '').lower()
-                        score = res.get('score', 0.0)
-                    else:
-                        label = getattr(res, 'label', '').lower()
-                        score = getattr(res, 'score', 0.0)
-                        
-                    if label == 'positive':
-                        prob_pos = score
-                    elif label == 'negative':
-                        prob_neg = score
+            # FinBERT classification with retry logic
+            prob_pos, prob_neg = analyze_headline_with_retry(headline)
             
             sentiment = prob_pos - prob_neg
             weighted_total += (sentiment * weight)
             total_weight += weight
             processed += 1
-            print(f"[{'MACRO' if weight > 1.0 else 'TECH'}] Processed: '{headline}' | Sentiment: {sentiment:.3f}")
+            print(f"[{'MACRO' if weight > 1.0 else 'TECH'}] Processed: '{headline[:80]}...' | Sentiment: {sentiment:.3f}")
             
         except Exception as e:
-            print(f"Error processing headline: {headline} - {e}")
+            failed += 1
+            print(f"Failed after retries ({failed}): {headline[:80]}... - {str(e)[:100]}")
             continue
 
     if processed == 0:
+        print(f"WARNING: No headlines processed successfully. {failed} failed.")
         return SentimentResponse(symbol=symbol, sentiment_score=0.0, headlines_processed=0)
 
     # Weighted average sentiment
     avg_score = weighted_total / total_weight if total_weight > 0 else 0.0
     # Cap between -1 and 1
     avg_score = max(-1.0, min(1.0, avg_score))
+    
+    print(f"Summary: {processed} processed, {failed} failed, final score: {avg_score:.3f}")
     
     return SentimentResponse(
         symbol=symbol,

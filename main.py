@@ -93,10 +93,10 @@ def analyze_headline_with_retry(headline: str, max_retries: int = 3, delay: floa
                 headline,
                 model="ProsusAI/finbert",
             )
-            
+
             prob_pos = 0.0
             prob_neg = 0.0
-            
+
             # Parse the results
             if hasattr(results, "__iter__"):
                 for res in results:
@@ -106,21 +106,27 @@ def analyze_headline_with_retry(headline: str, max_retries: int = 3, delay: floa
                     else:
                         label = getattr(res, 'label', '').lower()
                         score = getattr(res, 'score', 0.0)
-                        
+
                     if label == 'positive':
                         prob_pos = score
                     elif label == 'negative':
                         prob_neg = score
-            
+
             return prob_pos, prob_neg
-            
+
         except Exception as e:
+            # Hugging Face API rate limit or network error handling
+            err_msg = str(e).lower()
+            if 'rate limit' in err_msg or 'quota' in err_msg or '429' in err_msg:
+                print(f"[RATE LIMIT] Hugging Face API rate limit hit: {e}. Using fallback neutral sentiment.")
+                return 0.0, 0.0
             if attempt < max_retries - 1:
                 wait_time = delay * (2 ** attempt)  # Exponential backoff
                 print(f"Retry {attempt + 1}/{max_retries} for headline after {wait_time:.1f}s: {str(e)[:100]}")
                 time.sleep(wait_time)
             else:
-                raise e
+                print(f"[ERROR] Failed to analyze headline after {max_retries} attempts: {e}. Using fallback neutral sentiment.")
+                return 0.0, 0.0
 
 @app.get("/sentiment", response_model=SentimentResponse)
 def get_sentiment(symbol: str = Query(..., description="Forex symbol to analyze, e.g., EURUSD")):
